@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import corf
+import cfrag
+import cnano
+import flch
+import bat
+import stcol
+import nanobat
+import argparse
+import multiprocessing
+import subprocess
+from argparse import RawTextHelpFormatter
+
+##For convenience paths can be specified below:
+path_to_directory_diamond_binaries = ''
+path_to_directory_prodigal_binaries = ''
+path_to_directory_with_taxonomy_files=''
+database=''
+
+cpu = multiprocessing.cpu_count()
+
+parser = argparse.ArgumentParser(add_help=False, usage = ' CAT --prefix CAT_out --fna my_library.fna [other parameters]   OR \n\n\tCAT  --prefix CAT_out --bins ./dir_with_bins/ [other parameters]', formatter_class=RawTextHelpFormatter, epilog="Examples of usage: \n If software is in PATH and taxonomy files are in the current directory. Otherwise, can be provided separately or be specified inside the script \n 1. Default: ORFs calling, diamond search, classification \n CAT --prefix CAT_out --fna my_library.fna \n 2. Contigs fragmentation, translation in 6 frames, diamond search, classification: \n CAT  --prefix CAT_out --fna my_library.fna --sft \n 3. ORFs were already predicted: \n CAT  --prefix CAT_out --no-orf --faa predicted_orfs.faa --con-prot links_file.tab\n 4. There is an alignment file: \n CAT  --prefix CAT_out --no-align -d alignment.m8 --con-prot links_file.tab\n 5. Classification of binned contigs: \n CAT  --prefix CAT_out --bins ./dir_with_bins/")
+required = parser.add_argument_group('Required arguments')
+required.add_argument('-p', "--prefix", nargs=1, metavar='', required=True,
+                    help="Unique identifier for the library")
+required2 = parser.add_argument_group('AND one of the mutually exclusive arguments')
+group = required2.add_mutually_exclusive_group(required=True)
+group.add_argument('-f',"--fna", nargs=1, metavar='',
+                    help="File with long sequences of DNA in FASTA format")
+group.add_argument('-b',"--bins", nargs=1, metavar='',
+                    help="Path to directory with files of binned long sequences of DNA, one file per bin")
+
+options = parser.add_argument_group('Optional arguments')
+
+options.add_argument("--db", nargs=1, metavar='', default=[database],
+                    help="Diamond-formatted database of reference sequences")
+options.add_argument('-n',"--diamond", nargs=1, metavar='', default=[path_to_directory_diamond_binaries],
+                    help="Path to directory with diamond executable")
+options.add_argument('-r',"--prodigal", nargs=1, metavar='', default=[path_to_directory_prodigal_binaries],
+                    help="Path to directory with prodigal executable")
+options.add_argument('-x',"--tax_files", nargs=1, metavar='', default=[path_to_directory_with_taxonomy_files],
+                    help="Path to directory with NCBI taxonomy files")
+
+options.add_argument('-s',"--sft", action="store_true",
+                    help="Use six frame translation of DNA fragments instead of predicting ORFs")
+
+options.add_argument('-o',"--no-orf", action="store_true",
+                    help="Omit predicting ORFs and proceed with protein sequences provided")
+
+options.add_argument('-g',"--no-align", action="store_true",
+                    help="Omit steps of predicting ORFs and diamond homology search and proceed with results of alignment provided")
+options.add_argument('-c',"--con-prot", nargs=1, metavar='',
+                    help="File with links between names of contigs and names of predicted proteins")
+options.add_argument('-a',"--faa", nargs=1, metavar='',
+                    help="File with sequences of proteins in FASTA format")
+
+options.add_argument("-d", nargs=1, metavar='',
+                    help="File with results of alignment, m8 format")
+
+options.add_argument("--b1", nargs=1, choices=range(100), default=[10], type=int,
+                    metavar='', help="Percentage range from highest bitscore for LCA identification of individual ORFs (0-100) (Default:20)")
+options.add_argument("--b2", nargs=1, choices=[x / 100.0 for x in range(100)], default=[0.5], type=float,
+                    metavar='',
+                    help="Cutoff for the maximum achievable bitscore for the contig (0-1) (Defaul:0.5)")
+options.add_argument("--outdir", nargs=1, metavar='', default=['./'],
+                    help="Output directory (Default: current directory)")
+
+options.add_argument('-t',"--threads", nargs=1, metavar='', default=[cpu], type=int,
+                    help="Number of threads to be used by diamond")
+options.add_argument('-l',"--qual", nargs=1, metavar='', default=[0], type=int,
+                    help="Minimal alignment quality (bitscore) which can be used in classification (Default:0)")
+options.add_argument('-e',"--sens", action="store_true",
+                    help="Turn on --sensitive mode of diamond aligner")
+
+options.add_argument("--no-lca-file", action="store_true",
+                    help="Suppress output of file with LCA per ORF (non-aplicable for --sft mode)")
+options.add_argument("--no-summary-file", action="store_true",
+                    help="Suppress output of summary file")
+
+options.add_argument("-q","--quiet", action="store_true",
+                    help="increase output verbosity")
+options.add_argument("-h","--help", action='help',
+                    help="Show this help message and exit")
+options.add_argument("-v","--version", action='version', version='%(prog)s 3.0',
+                    help="Show CAT version and exit")
+
+for_sft = parser.add_argument_group('Additional options for --sft mode')
+for_sft.add_argument("--table", nargs=1, metavar='', choices=['1','2','3','4','5','6','9','10','11','12','13','14','16','21','22','23','24','25','26','27','28','29','30','31'], default=['11'],
+                    help="Genetic code table for --sft mode (as specified at NCBI), Default:11")
+for_sft.add_argument('-m', "--fragment", nargs=1, metavar='', choices=range(100,3000),
+                     default=[300], type=int,
+                    help="Length of fragments in bp for --sft mode (Default:300)")
+
+for_bat = parser.add_argument_group('Additional options for --bins mode')
+for_bat.add_argument('-w', '--bins-b2-conf', nargs=1, choices=[ x / 100.0 for x in range(50, 100)], default=[0.5], type=float, metavar='', help="Cutoff for the maximum achievable bitscore for the bin for confident classification [0.5-1] (Defaul:0.5)")
+for_bat.add_argument('-y', '--bins-b2-other', nargs=1, choices=[ x / 100.0 for x in range(50)], default=[0.1], type=float, metavar='', help="Cutoff value for other bin classifications [0-0.5) (Defaul:0.1)")
+
+args = parser.parse_args()
+directory  = args.prefix[0] + '_CAT_output'
+if not os.path.exists(directory):
+    os.makedirs(directory)
+#subprocess.call(['mkdir', args.prefix[0] + '_CAT_output'])
+prefix = args.outdir[0].rstrip('/') + '/' + args.prefix[0] + '_CAT_output/' + args.prefix[0]
+
+log = open(prefix + '_CAT_output.log','w')
+log.write('CAT 3.0\n')
+
+##Software and file checks
+if args.no_align == False:
+    diamond = args.diamond[0].rstrip('/') + '/diamond'
+    flch.CheckDiamond(diamond, args.db[0], log, args.quiet)
+if args.no_orf == False and args.no_align == False:
+    prodigal = args.prodigal[0].rstrip('/') + '/prodigal'
+    flch.CheckProdigal(prodigal, log, args.quiet)
+tax_files = args.tax_files[0].rstrip('/') + '/'
+flch.CheckTaxFiles(tax_files, log, args.quiet)
+if len(args.db[0]) == 0 and args.no_align == False:
+    if args.quiet == False:
+        print('Please check that you provided path to diamond database')
+    log.write('Please check that you provided path to diamond database' + '\n')
+
+cust_bit_thresh=1 - float(args.b1[0])/float(100)
+
+if args.fna:
+    contigs_info = flch.CheckFna(args.fna[0], log, args.quiet)
+    if args.quiet == False:
+        print('CAT run in contigs annotation mode with b1 parameter equal to ' + str(args.b1[0]) + ' and b2 equal to ' + str(args.b2[0]))
+        print(str(len(contigs_info)) + ' contigs for classification provided')
+    log.write('CAT run in contigs annotation mode with b1 parameter equal to ' + str(args.b1[0]) + ' and b2 equal to ' + str(args.b2[0]) + '\n' + str(len(contigs_info)) + ' contigs for classification provided\n')
+elif args.bins:
+    bins_dir = args.bins[0].rstrip('/') + '/'
+    if not os.path.isdir(bins_dir):
+        if args.quiet == False:
+            print('Provided directory with bins files is not a directory. Exit.')
+        log.write('Provided directory with bins files is not a directory. Exit.\n')
+        log.close()
+        sys.exit()
+    else:
+        if args.quiet == False:
+            print('CAT run in bins annotation mode with b1 parameter equal to ' + str(args.b1[0]) + ' and the following set of b2 parameters: \n for individual contigs classification ' + str(args.b2[0]) + '\n for confident bins annotation ' + str(args.bins_b2_conf[0]) + '\n for other classifications of bins ' + str(args.bins_b2_other[0]))
+        log.write('CAT run in bins annotation mode with b1 parameter equal to ' + str(args.b1[0]) + ' and the following set of b2 parameters: \n for individual contigs classification ' + str(args.b2[0]) + '\n for confident bins annotation ' + str(args.bins_b2_conf[0]) + '\n for other classifications of bins ' + str(args.bins_b2_other[0]) + '\n')
+        contigs_info = flch.CheckFna_bins(bins_dir, log, args.quiet)
+        if args.quiet == False:
+            print(str(len(contigs_info)) + ' contigs in all bins provided')
+        log.write(str(len(contigs_info)) + ' contigs in all bins provided\n')
+
+if args.con_prot:
+    flch.CheckTabFiles(args.con_prot[0], log, args.quiet)
+protein_fasta = ''
+prot_weight = {}
+
+if args.d:
+    diamond_file = args.d[0]
+    flch.CheckDiamondFile(diamond_file, log, args.quiet)
+if args.faa:
+    protein_fasta = args.faa[0]
+    flch.CheckFaa(protein_fasta, log, args.quiet)
+
+if args.bins:
+    if args.no_orf == False and args.no_align == False:
+        if args.sft == False:
+            bins_dict = stcol.MakeBinsConnections_concatenate(prefix, bins_dir)
+            prot_con_links, bins_dict = flch.runProdigal_bat(prefix, prodigal, bins_dict, log, args.quiet)
+            protein_fasta = prefix + '_predicted_prot.faa'
+            diamond_file = prefix + '_alignment_diamond'
+            flch.runDiamond(diamond, prefix, args.db[0], protein_fasta, args.sens, args.threads[0], log, args.quiet)
+            prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        elif args.sft == True:
+            if args.quiet == False:
+                print('CAT run in SFT mode, translation of provided sequences in six frames is starting... \nTranslation table number ' + str(args.table[0]) + ' will be used. Sequences will be cut in fragments of ' + str(args.fragment[0]) + ' bp long')
+            log.write('CAT run in SFT mode, translation of provided sequences in six frames is starting... \nTranslation table number ' + str(args.table[0]) + ' will be used. Sequences will be cut in fragments of ' + str(args.fragment[0]) + ' bp long' + '\n')
+            con_prot_links, bins_dict = cfrag.fragments_translation_bins(args.fragment[0], prefix, args.table[0], bins_dir)
+            protein_fasta = prefix + '_fragments_6_frames_translations.faa'
+            diamond_file = prefix + '_alignment_diamond'
+            flch.runDiamond(diamond, prefix, args.db[0], protein_fasta, args.sens, args.threads[0], log, args.quiet)
+    elif args.no_orf == True and args.no_align == False:
+        if args.faa and args.con_prot:
+            if args.quiet == False:
+                print('Protein prediction step skipped. CAT proceeds with homology search.')
+            log.write('Protein prediction step skipped. CAT proceeds with homology search.\n')
+            diamond_file = prefix + '_alignment_diamond'
+            bins_dict, prot_con_links, con_prot_links = stcol.MakeBinsDict(args.con_prot[0])
+            flch.runDiamond(diamond, prefix, args.db[0], protein_fasta, args.sens, args.threads[0], log, args.quiet)
+            if args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        else:
+            if args.quiet == False:
+                print('For requested mode CAT needs --faa file with predicted ORFs (or result of translation in 6 frames) and file with conections of contig names to names of proteins (--con-prot argument)')
+            log.write('For requested mode CAT needs --faa file with predicted ORFs (or result of translation in 6 frames) and file with conections of contig names to names of proteins (--con-prot argument)' + '\n')
+            log.close()
+            sys.exit(1)
+    elif args.no_orf == True and args.no_align == True:
+        if args.faa and args.con_prot and not args.d:
+            if args.quiet == False:
+                print('Two mutually exclusive option were provided. CAT continues with homology search...')
+            log.write('Two mutually exclusive option were provided. CAT continues with homology search...\n')
+            diamond_file = prefix + '_alignment_diamond'
+            bins_dict, prot_con_links, con_prot_links = stcol.MakeBinsDict(args.con_prot[0])
+            flch.runDiamond(diamond, prefix, args.db[0], protein_fasta, args.sens, args.threads[0], log, args.quiet)
+            if args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta,prot_con_links)
+        elif args.con_prot and args.d:
+            if args.quiet == False:
+                print('Two mutually exclusive option were provided. CAT continues with classification...')
+            log.write('Two mutually exclusive option were provided. CAT continues with classification...\n')
+            bins_dict, prot_con_links, con_prot_links = stcol.MakeBinsDict(args.con_prot[0])
+            diamond_file = args.d[0]
+            if args.faa and args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta,prot_con_links)
+        else:
+            if args.quiet == False:
+                print('Two mutually exclusive option were provided. But anyway, for both of these modes of function CAT needs more files: --faa file with predicted ORFs (or result of translation in 6 frames) or -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)')
+            log.write('Two mutually exclusive option were provided. But anyway, for both of these modes of function CAT needs more files: --faa file with predicted ORFs (or result of translation in 6 frames) or -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)' + '\n')
+            log.close()
+            sys.exit(1)
+    elif args.no_orf == False and args.no_align == True:
+        if args.d and args.con_prot:
+            if args.quiet == False:
+                print('Steps of protein prediction and homology search were skipped. CAT proceeds with classification only.')
+            log.write('Steps of protein prediction and homology search were skipped. CAT proceeds with classification only.\n')
+            diamond_file = args.d[0]
+            bins_dict, prot_con_links, con_prot_links = stcol.MakeBinsDict(args.con_prot[0])
+            if args.faa and args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        else:
+            if args.quiet == False:
+                print('For requested mode of function CAT needs -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)')
+            log.write('For requested mode of function CAT needs -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)\n')
+            log.close()
+            sys.exit(1)
+
+    if args.sft == False:
+        bat.bat_with_orfs(tax_files, prefix, diamond_file, protein_fasta, args.qual[0], cust_bit_thresh, args.b2[0], args.no_lca_file, args.no_summary_file, prot_con_links, contigs_info, prot_weight, bins_dict, log, args.quiet, args.bins_b2_conf[0], args.bins_b2_other[0])
+    elif args.sft == True:
+        nanobat.bat_without_orfs(tax_files, prefix, args.fragment[0], diamond_file, cust_bit_thresh, args.qual[0], args.b2[0], args.no_summary_file, contigs_info, con_prot_links, bins_dict, log, args.quiet, args.bins_b2_conf[0], args.bins_b2_other[0])
+            
+
+
+elif args.fna:
+    if args.no_orf == False and args.no_align == False:
+        if args.sft == False:
+            prot_con_links, con_prot_links = flch.runProdigal(prefix, args.fna[0], prodigal, log, args.quiet)
+            protein_fasta = prefix + '_predicted_prot.faa'
+            prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        elif args.sft == True:
+            if args.quiet == False:
+                print('CAT run in SFT mode, translation of provided sequences in six frames is starting... \nTranslation table number ' + str(args.table[0]) + ' will be used. Sequences will be cut in fragments of ' + str(args.fragment[0]) + ' bp long')
+            log.write('CAT run in SFT mode, translation of provided sequences in six frames is starting... \nTranslation table number ' + str(args.table[0]) + ' will be used. Sequences will be cut in fragments of ' + str(args.fragment[0]) + ' bp long' + '\n')
+
+            con_prot_links = cfrag.fragments_translation(args.fna[0], args.fragment[0], prefix, args.table[0])
+            protein_fasta = prefix + '_fragments_6_frames_translations.faa'
+        diamond_file = prefix + '_alignment_diamond'
+        flch.runDiamond(diamond, prefix, args.db[0], protein_fasta, args.sens, args.threads[0], log, args.quiet)
+    elif args.no_orf == True and args.no_align == False:
+        if args.faa and args.con_prot:
+            if args.quiet == False:
+                print('Protein prediction step skipped. CAT proceeds with homology search.')
+            log.write('Protein prediction step skipped. CAT proceeds with homology search.\n')
+
+            diamond_file = prefix + '_alignment_diamond'
+            prot_con_links, con_prot_links = stcol.MakeLinksFile(args.con_prot[0])
+            flch.runDiamond(diamond, prefix, args.db[0], protein_fasta, args.sens, args.threads[0], log, args.quiet)
+            if args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        else:
+            if args.quiet == False:
+                print('For requested mode CAT needs --faa file with predicted ORFs (or result of translation in 6 frames) and file with conections of contig names to names of proteins (--con-prot argument)')
+            log.write('For requested mode CAT needs --faa file with predicted ORFs (or result of translation in 6 frames) and file with conections of contig names to names of proteins (--con-prot argument)' + '\n')
+            log.close()
+            sys.exit(1)
+    elif args.no_orf == True and args.no_align == True:
+        if args.faa and args.con_prot and not args.d:
+            if args.quiet == False:
+                print('Two mutually exclusive option were provided. CAT continues with homology search...')
+            log.write('Two mutually exclusive option were provided. CAT continues with homology search...\n')
+            diamond_file = prefix + '_alignment_diamond'
+            prot_con_links, con_prot_links = stcol.MakeLinksFile(args.con_prot[0])
+            flch.runDiamond(diamond, prefix, args.db[0], protein_fasta, args.sens, args.threads[0], log, args.quiet)
+            if args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        elif args.con_prot and args.d:
+            if args.quiet == False:
+                print('Two mutually exclusive option were provided. CAT continues with classification...')
+            log.write('Two mutually exclusive option were provided. CAT continues with classification...\n')
+
+            prot_con_links, con_prot_links = stcol.MakeLinksFile(args.con_prot[0])
+            diamond_file = args.d[0]
+            if args.faa and args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        else:
+            if args.quiet == False:
+                print('Two mutually exclusive option were provided. But anyway, for both of these modes of function CAT needs more files: --faa file with predicted ORFs (or result of translation in 6 frames) or -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)')
+            log.write('Two mutually exclusive option were provided. But anyway, for both of these modes of function CAT needs more files: --faa file with predicted ORFs (or result of translation in 6 frames) or -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)' + '\n')
+            log.close()
+            sys.exit(1)
+    elif args.no_orf == False and args.no_align == True:
+        if args.d and args.con_prot:
+            if args.quiet == False:
+                print('Steps of protein prediction and homology search were skipped. CAT proceeds with classification only.')
+            log.write('Steps of protein prediction and homology search were skipped. CAT proceeds with classification only.\n')
+            diamond_file = args.d[0]
+            prot_con_links, con_prot_links = stcol.MakeLinksFile(args.con_prot[0])
+            if args.faa and args.sft == False:
+                prot_weight = stcol.InfoFromProt(protein_fasta, prot_con_links)
+        else:
+            if args.quiet == False:
+                print('For requested mode of function CAT needs -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)')
+            log.write('For requested mode of function CAT needs -d file with results of homology search and file with conections of contig names to names of proteins (--con-prot argument)\n')
+            log.close()
+            sys.exit(1)
+    if args.sft == False:
+        corf.cat_with_orfs(tax_files, args.fna[0], prefix, diamond_file, protein_fasta, args.qual[0], cust_bit_thresh, args.b2[0], args.no_lca_file, args.no_summary_file, prot_con_links, contigs_info, prot_weight, con_prot_links, log, args.quiet)
+    elif args.sft == True:
+        cnano.cat_without_orfs(tax_files, args.fna[0], prefix, args.fragment[0], diamond_file, cust_bit_thresh, args.qual[0], args.b2[0], args.no_summary_file, contigs_info, con_prot_links, log, args.quiet)
+
+log.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
